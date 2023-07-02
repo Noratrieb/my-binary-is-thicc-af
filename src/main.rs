@@ -17,6 +17,8 @@ fn main() -> Result<()> {
         .nth(1)
         .unwrap_or("./target/debug/my-binary-is-thicc-af".into());
 
+    let limit = 10;
+
     let data = std::fs::read(&path).wrap_err_with(|| format!("error opening `{path}`"))?;
     let object = object::File::parse(data.as_slice()).context("could not parse object file")?;
 
@@ -54,7 +56,11 @@ fn main() -> Result<()> {
     let mut root_groups = Groups(HashMap::new());
 
     for (sym, size) in symbol_sizes {
-        let components = symbol_components(sym).with_context(|| sym.to_string())?;
+        let mut components = symbol_components(sym).with_context(|| sym.to_string())?;
+
+        if components.len() > limit {
+            components.truncate(limit);
+        }
 
         add_to_group(&mut root_groups, components, size);
     }
