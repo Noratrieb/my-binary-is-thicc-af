@@ -1,8 +1,7 @@
-use std::collections::HashMap;
-
 use eyre::{eyre, Context, ContextCompat, Result};
 use object::{Object, ObjectSection, ObjectSymbol};
 use serde::Serialize;
+use rustc_hash::FxHashMap;
 
 #[derive(serde::Serialize)]
 struct SerGroup {
@@ -17,7 +16,7 @@ fn main() -> Result<()> {
         .nth(1)
         .unwrap_or("./target/debug/my-binary-is-thicc-af".into());
 
-    let limit = 10;
+    let limit = 100;
 
     let data = std::fs::read(&path).wrap_err_with(|| format!("error opening `{path}`"))?;
     let object = object::File::parse(data.as_slice()).context("could not parse object file")?;
@@ -53,7 +52,7 @@ fn main() -> Result<()> {
     symbol_sizes.sort_by_key(|&(_, size)| size);
     symbol_sizes.reverse();
 
-    let mut root_groups = Groups(HashMap::new());
+    let mut root_groups = Groups(FxHashMap::default());
 
     for (sym, size) in symbol_sizes {
         let mut components = symbol_components(sym).with_context(|| sym.to_string())?;
@@ -78,7 +77,7 @@ fn main() -> Result<()> {
 }
 
 #[derive(Debug)]
-struct Groups(HashMap<String, Group>);
+struct Groups(FxHashMap<String, Group>);
 
 #[derive(Debug)]
 struct Group {
@@ -120,7 +119,7 @@ fn add_to_group(mut cur_groups: &mut Groups, components: Vec<String>, sym_size: 
     for head in components {
         let grp = cur_groups.0.entry(head).or_insert(Group {
             weight: sym_size, // NOTE: This is a dummy value for everything but the innermost nesting.
-            children: Groups(HashMap::new()),
+            children: Groups(FxHashMap::default()),
         });
         cur_groups = &mut grp.children;
     }
