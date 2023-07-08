@@ -1,7 +1,11 @@
-use eyre::{eyre, Context, ContextCompat, Result};
+mod symbols;
+
+use eyre::{eyre, Context, Result};
 use object::{Object, ObjectSection, ObjectSymbol};
-use serde::Serialize;
 use rustc_hash::FxHashMap;
+use serde::Serialize;
+
+use crate::symbols::symbol_components;
 
 #[derive(serde::Serialize)]
 struct SerGroup {
@@ -56,10 +60,14 @@ fn main() -> Result<()> {
 
     for (sym, size) in symbol_sizes {
         let mut components = symbol_components(sym).with_context(|| sym.to_string())?;
-
         if components.len() > limit {
             components.truncate(limit);
         }
+
+        eprintln!(
+            "{}",
+            rustc_demangle::demangle(sym).to_string()
+        );
 
         add_to_group(&mut root_groups, components, size);
     }
@@ -134,139 +142,3 @@ fn propagate_weight(group: &mut Group) -> u64 {
     total_weight
 }
 
-fn symbol_components(sym: &str) -> Result<Vec<String>> {
-    let demangled = rustc_demangle::demangle(sym).to_string();
-
-    let components = if demangled.starts_with('<') {
-        parse_qpath(&demangled)
-            .context("invalid qpath")
-            .and_then(|qpath| qpath_components(qpath))
-            .unwrap_or_else(|_| demangled.split("::").collect::<Vec<_>>())
-    } else {
-        // normal path
-        demangled.split("::").collect::<Vec<_>>()
-    };
-
-    let components = components
-        .into_iter()
-        .map(|c| {
-            if c.contains(",") {
-                format!("\"{c}\"")
-            } else {
-                c.to_owned()
-            }
-        })
-        .collect::<Vec<_>>();
-
-    // qpath
-    return Ok(components);
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct QPath<'a> {
-    qself: &'a str,
-    trait_: &'a str,
-    pathy_bit: &'a str,
-}
-
-fn qpath_components(qpath: QPath<'_>) -> Result<Vec<&str>> {
-    if qpath.qself.starts_with('<') {
-        if let Ok(sub_qpath) = parse_qpath(qpath.qself) {
-            let mut sub_components = qpath_components(sub_qpath)?;
-            sub_components.extend(qpath.pathy_bit.split("::"));
-            Ok(sub_components)
-        } else {
-            Ok(qpath
-                .qself
-                .split("::")
-                .chain(qpath.pathy_bit.split("::"))
-                .collect())
-        }
-    } else {
-        Ok(qpath
-            .qself
-            .split("::")
-            .chain(qpath.pathy_bit.split("::"))
-            .collect())
-    }
-}
-
-// FIXME: Apparently the symbol `std::os::linux::process::<impl core::convert::From<std::os::linux::process::PidFd> for std::os::fd::owned::OwnedFd>::from` exists in std
-// I have no clue what to do about that.
-
-fn parse_qpath(s: &str) -> Result<QPath<'_>> {
-    let mut chars = s.char_indices().skip(1);
-    let mut angle_brackets = 1u64;
-
-    let mut result = None;
-    let mut as_idx = None;
-
-    while let Some((idx, char)) = chars.next() {
-        match char {
-            '<' => angle_brackets += 1,
-            '>' => {
-                angle_brackets -= 1;
-                if angle_brackets == 0 {
-                    result = Some(idx);
-                    break;
-                }
-            }
-            ' ' => {
-                if angle_brackets == 1 && as_idx == None {
-                    as_idx = Some(idx);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let q_close_idx = result.wrap_err_with(|| {
-        format!("qualified symbol `{s}` does not end qualified part with > properly")
-    })?;
-
-    let as_idx =
-        as_idx.wrap_err_with(|| format!("qualified symbol `{s}` does not contain ` as `"))?;
-
-    let q = &s[..q_close_idx];
-    let pathy_bit = &s[q_close_idx + 1..];
-    let pathy_bit = pathy_bit.strip_prefix("::").wrap_err_with(|| {
-        format!("path after qualification does not start with `::`: `{pathy_bit}`")
-    })?;
-
-    let qself = &q[1..as_idx];
-    let trait_ = &q[(as_idx + " as ".len())..];
-
-    Ok(QPath {
-        qself,
-        trait_,
-        pathy_bit,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::QPath;
-
-    use super::parse_qpath;
-
-    #[test]
-    fn parse_qpaths() {
-        assert_eq!(
-            parse_qpath("<std::path::Components as core::fmt::Debug>::fmt").unwrap(),
-            QPath {
-                qself: "std::path::Components",
-                trait_: "core::fmt::Debug",
-                pathy_bit: "fmt",
-            }
-        );
-
-        assert_eq!(
-            parse_qpath("<<std::path::Components as core::fmt::Debug>::fmt::DebugHelper as core::fmt::Debug>::fmt").unwrap(),
-            QPath {
-                qself: "<std::path::Components as core::fmt::Debug>::fmt::DebugHelper",
-                trait_: "core::fmt::Debug",
-                pathy_bit: "fmt",
-            }
-        );
-    }
-}
