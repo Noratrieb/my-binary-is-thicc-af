@@ -1,5 +1,6 @@
 //! This is really hacky code where we best-effort extract some sort of tree
 //! from symbols. It's bad.
+#![allow(dead_code)]
 
 use std::{fmt::Debug, iter::Peekable, str::CharIndices};
 

@@ -1,7 +1,9 @@
 mod symbols;
 
+use std::ops::Range;
+
 use eyre::{eyre, Context, Result};
-use object::{Object, ObjectSection, ObjectSymbol};
+use object::{File, Object, ObjectSection, ObjectSymbol};
 use rustc_hash::FxHashMap;
 use serde::Serialize;
 
@@ -17,44 +19,52 @@ struct SerGroup {
 
 fn main() -> Result<()> {
     let path = std::env::args()
-        .nth(1)
+        .skip(1)
+        .filter(|arg| !arg.starts_with("-"))
+        .next()
         .unwrap_or("./target/debug/my-binary-is-thicc-af".into());
 
-    let limit = 100;
+    let rodata = std::env::args().any(|arg| arg == "--rodata");
 
     let data = std::fs::read(&path).wrap_err_with(|| format!("error opening `{path}`"))?;
     let object = object::File::parse(data.as_slice()).context("could not parse object file")?;
+
+    if !rodata {
+        analyze_sym_modules(object)?;
+    } else {
+        let all_sections = object
+            .sections()
+            .filter(|section| section.name().is_ok_and(|name| name.contains(".rodata")))
+            .map(|section| {
+                let range = section.address()..(section.address() + section.size());
+                symbol_sizes_in(&object, range)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut symbol_sizes = all_sections.into_iter().flatten().collect::<Vec<_>>();
+        symbol_sizes.sort_by_key(|&(_, size)| size);
+
+        if symbol_sizes.is_empty() {
+            eprintln!("no symbols found");
+        } else {
+            for (sym, size) in symbol_sizes {
+                println!("{:10} - {}", size.to_string(), sym);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn analyze_sym_modules(object: File<'_>) -> Result<()> {
+    let limit = 100;
 
     let text = object
         .section_by_name(".text")
         .ok_or_else(|| eyre!("could not find .text section"))?;
 
-    let symbols = object.symbols();
-
     let text_range = text.address()..(text.address() + text.size());
 
-    let mut symbols_sorted = symbols
-        .into_iter()
-        .filter(|sym| text_range.contains(&sym.address()))
-        .collect::<Vec<_>>();
-
-    symbols_sorted.sort_by_key(|s| s.address());
-
-    let mut symbol_sizes = Vec::new();
-
-    for syms in symbols_sorted.windows(2) {
-        let [first, second] = syms else {
-            unreachable!()
-        };
-        let first_size = second.address() - first.address();
-
-        let sym_name = first.name().wrap_err("symbol name has invalid UTF-8")?;
-
-        symbol_sizes.push((sym_name, first_size));
-    }
-
-    symbol_sizes.sort_by_key(|&(_, size)| size);
-    symbol_sizes.reverse();
+    let symbol_sizes = symbol_sizes_in(&object, text_range)?;
 
     let mut root_groups = Groups(FxHashMap::default());
 
@@ -64,10 +74,7 @@ fn main() -> Result<()> {
             components.truncate(limit);
         }
 
-        eprintln!(
-            "{}",
-            rustc_demangle::demangle(sym).to_string()
-        );
+        eprintln!("{}", rustc_demangle::demangle(sym).to_string());
 
         add_to_group(&mut root_groups, components, size);
     }
@@ -80,7 +87,6 @@ fn main() -> Result<()> {
         "{}",
         serde_json::to_string(&root_groups).wrap_err("failed to serialize groups")?
     );
-
     Ok(())
 }
 
@@ -142,3 +148,21 @@ fn propagate_weight(group: &mut Group) -> u64 {
     total_weight
 }
 
+fn symbol_sizes_in<'a>(object: &'a File<'a>, range: Range<u64>) -> Result<Vec<(&'a str, u64)>> {
+    let symbols = object
+        .symbols()
+        .into_iter()
+        .filter(|sym| range.contains(&sym.address()))
+        .collect::<Vec<_>>();
+
+    let mut symbol_sizes = Vec::new();
+
+    for sym in symbols {
+        let sym_name = sym.name().wrap_err("symbol name has invalid UTF-8")?;
+        symbol_sizes.push((sym_name, sym.size()));
+    }
+
+    symbol_sizes.sort_by_key(|&(_, size)| size);
+    symbol_sizes.reverse();
+    Ok(symbol_sizes)
+}
